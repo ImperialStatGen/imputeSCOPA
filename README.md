@@ -1,4 +1,5 @@
-imputeSCOPA: a C++ tool for imputing high-dimensional data with random forest. 
+imputeSCOPA: a C++ tool for imputing high-dimensional data. 
+Currently imputeSCOPA implements the random forest algorithm for imputation. 
 
 Requirements:
 -------------
@@ -15,11 +16,11 @@ data: includes an example dataset to run the software.
 
 To build:
 ---------
-export RANGER_DIR=/path/to/your/installation/ranger
-mkdir build
-cd build
-cmake ..
-make
+$export RANGER_DIR=/path/to/your/installation/ranger
+$mkdir build
+$cd build
+$cmake ..
+$make
 
 You should get an imputeSCOPA executable. The options for usage can be seen by just running the command ./imputeSCOPA 
 
