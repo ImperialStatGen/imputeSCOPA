@@ -22,7 +22,7 @@ $cd build
 $cmake .. 
 $make
 
-You should get an imputeSCOPA executable. The options for usage can be seen by just running the command ./imputeSCOPA 
+You should get an imputeSCOPA executable. The options for usage can be seen by just running the command ./imputeSCOPA. 
 
 To run:
 -------
