@@ -1,4 +1,5 @@
-imputeSCOPA: a C++ tool for imputing high-dimensional data with random forest. 
+imputeSCOPA: a C++ tool for imputing high-dimensional data.
+Currently imputeSCOPA implements the random forest algorithm for imputation. 
 
 Requirements:
 -------------
