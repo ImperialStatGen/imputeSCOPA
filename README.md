@@ -33,5 +33,5 @@ source('csImputeSCOPA.R')
 imp <- csImputeSCOPA(output, maxiter = 5, num.trees = 10, verbose = TRUE, seed=<seed>)
 write.table(data.frame("ID"=rownames(imp),imp), "../data/tstout.txt",  quote=F, row.names=F, sep="\t");
 
-If you are looking for duplication, you need to use the same <seed> in both a and b. 
+If you are looking for duplication, you need to use the same seed in both a and b. 
 
