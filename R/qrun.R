@@ -1,0 +1,4 @@
+output <- read.table("../../bdata/phigh_missing.txt", header=T, sep = ",", na.strings = "NA");
+output <- output[,2:dim(output)[2]]
+imp <- csImputeSCOPA(output, maxiter = mIters, num.trees = 10, verbose = TRUE, seed=2)
+write.table(data.frame("ID"=rownames(imp),imp), "../data/tstout.txt",  quote=F, row.names=F, sep=",");

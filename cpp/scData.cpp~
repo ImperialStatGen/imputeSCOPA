@@ -1,0 +1,399 @@
+#include <scData.h>
+
+#include <algorithm>
+#include <iostream>
+#include <iterator>
+
+#include <ctime>
+
+#include "utility.h"
+#include "TreeRegression.h"
+#include "Data.h"
+
+#define to_uvec(x) arma::conv_to<arma::uvec>::from(arma::Col<size_t>(x))
+
+TreeSCOPA::TreeSCOPA (std::unique_ptr<ranger::Data>& indata) : TreeRegression()
+{
+    rdata = dynamic_cast<ArmaDouble *>(indata.get());
+}
+
+TreeSCOPA::TreeSCOPA(std::vector<std::vector<size_t>>& child_nodeIDs, std::vector<size_t>& split_varIDs,
+                     std::vector<double>& split_values,
+                     std::unique_ptr<ranger::Data>& indata) : 
+    ranger::TreeRegression(child_nodeIDs, split_varIDs, split_values){
+    rdata = dynamic_cast<ArmaDouble *>(indata.get());
+}
+
+void TreeSCOPA::allocateMemory() {
+        
+  // Init counters if not in memory efficient mode
+  if (!memory_saving_splitting) {
+    size_t max_num_splits = data->getMaxNumUniqueValues();
+
+    // Use number of random splits for extratrees
+    if (splitrule == ranger::EXTRATREES && num_random_splits > max_num_splits) {
+      max_num_splits = num_random_splits;
+    }
+
+    counter.resize(max_num_splits);
+    sums.resize(max_num_splits);
+  }
+}
+
+double TreeSCOPA::estimate(size_t nodeID, arma::vec &svec) {
+    // Mean of responses of samples in node
+    double sum_responses_in_node = 0;
+    size_t num_samples_in_node = sampleIDs[nodeID].size();
+
+#if 0
+    for (size_t i = 0; i < sampleIDs[nodeID].size(); ++i) {
+        sum_responses_in_node += data->get(sampleIDs[nodeID][i], dependent_varID);
+    }
+#else
+    return arma::accu(svec) / ((double) svec.n_rows); //sum_responses_in_node = arma::accu(smat) / smat.n_cols;
+#endif
+    
+    return (sum_responses_in_node / (double) num_samples_in_node);
+}
+
+
+//std::cout<<"Res 1: "<<sum_responses_in_node<<" vs "<<sum_resp2<<std::endl;
+
+bool TreeSCOPA::splitNodeInternal(size_t nodeID, std::vector<size_t>& possible_split_varIDs) {
+    uint sz = sampleIDs[nodeID].size();
+    bool stop = (sz <= min_node_size);
+    arma::vec svec;
+    // Check node size, stop if maximum reached
+    /*if (sampleIDs[nodeID].size() <= min_node_size) {
+        split_values[nodeID] = estimate(nodeID, smat);
+        return true;
+        }*/
+    if (!stop) {
+        // Check if node is pure and set split_value to estimate and stop if pure
+        bool pure = true;
+        double pure_value = 0;
+        
+        for (size_t i = 0; i < sampleIDs[nodeID].size(); ++i) {
+            double value = data->get(sampleIDs[nodeID][i], dependent_varID);
+            if (i != 0 && value != pure_value) {
+                pure = false;
+                break;
+            }
+            pure_value = value;
+        }
+        if (pure) {
+            split_values[nodeID] = pure_value;
+            return true;
+        }
+    }
+
+#if 0
+    for (auto& sampleID : sampleIDs[nodeID]) {
+        sum_curr += data->get(sampleID, dependent_varID);
+    }
+#else
+    arma::uvec idvec = to_uvec(sampleIDs[nodeID]);
+    arma::uvec ddvec = to_uvec(std::vector<size_t> (sz, dependent_varID));
+            
+    arma::mat smat = rdata->cdata.submat(idvec, ddvec); //arma::uvec(sampleIDs[nodeID]),
+
+    svec = smat.col(0);
+    //arma::rowvec vsmat = arma::sum(smat);
+    sum_curr = arma::sum(svec); //vsmat.at(0);
+#endif
+
+    if (!stop) {
+        stop = findBestSplit(nodeID, possible_split_varIDs, svec);
+    }
+    
+    if (stop) {
+        //sumat = arma::accu(smat) / ((double) smat.n_cols);
+        split_values[nodeID] = sum_curr / svec.n_rows;
+        // * smat.n_rows); //sum_responses_in_node = arma::accu(smat) / smat.n_cols;
+        //split_values[nodeID] = estimate(nodeID, smat);
+        return true;
+    }
+    
+    return false;
+}
+
+void TreeSCOPA::createEmptyNodeInternal() {
+// Empty on purpose
+}
+
+double TreeSCOPA::computePredictionAccuracyInternal() {
+
+  size_t num_predictions = prediction_terminal_nodeIDs.size();
+  double sum_of_squares = 0;
+  for (size_t i = 0; i < num_predictions; ++i) {
+    size_t terminal_nodeID = prediction_terminal_nodeIDs[i];
+    double predicted_value = split_values[terminal_nodeID];
+    double real_value = data->get(oob_sampleIDs[i], dependent_varID);
+    if (predicted_value != real_value) {
+      sum_of_squares += (predicted_value - real_value) * (predicted_value - real_value);
+    }
+  }
+  return (1.0 - sum_of_squares / (double) num_predictions);
+}
+
+bool TreeSCOPA::findBestSplit(size_t nodeID, std::vector<size_t>& possible_split_varIDs, arma::vec& svec) {
+
+  size_t num_samples_node = sampleIDs[nodeID].size();
+  double best_decrease = -1;
+  size_t best_varID = 0;
+  double best_value = 0;
+
+  // Compute sum of responses in node
+  double sum_node = 0;
+#if 0
+  //if (index == 9) PRINT_TIME(std::cout<<"DataG ";);
+  for (auto& sampleID : sampleIDs[nodeID]) {
+    sum_node += data->get(sampleID, dependent_varID);
+  }
+  //if (index == 9) PRINT_TIME(std::cout<<"DataG Done ";);
+#else
+  sum_node = sum_curr;
+  
+  //if (index == 9) PRINT_TIME(std::cout<<"Nonc ";);
+  //smat = rdata->cdata.submat(arma::uvec(sampleIDs[nodeID]),
+  //arma::uvec(std::vector<size_t> (num_samples_node, dependent_varID)));
+  //sum_node = arma::accu(smat) / ((double) smat.n_cols);
+  //if (index == 9) PRINT_TIME(std::cout<<"Nonc Done ";);
+#endif
+
+  // For all possible split variables
+  for (auto& varID : possible_split_varIDs) {
+
+    // Find best split value, if ordered consider all values as split values, else all 2-partitions
+    if (data->isOrderedVariable(varID)) {
+
+      // Use memory saving method if option set
+      if (memory_saving_splitting) {
+          findBestSplitValueSmallQ(nodeID, varID, sum_node, num_samples_node, best_value, best_varID, best_decrease, svec);
+      } else {
+        // Use faster method for both cases
+        double q = (double) num_samples_node / (double) data->getNumUniqueDataValues(varID);
+        if (q < ranger::Q_THRESHOLD) {
+            //if (index == 9) PRINT_TIME(std::cout<<"Small q ";);            
+            findBestSplitValueSmallQ(nodeID, varID, sum_node, num_samples_node, best_value, best_varID, best_decrease, svec);
+          //if (index == 9) PRINT_TIME(std::cout<<"Small q done ";);
+        } else {
+            //if (index == 9) PRINT_TIME(std::cout<<"Large q ";);            
+            findBestSplitValueLargeQ(nodeID, varID, sum_node, num_samples_node, best_value, best_varID, best_decrease, svec);
+          //if (index == 9)  PRINT_TIME(std::cout<<"Large q done ";);            
+        }
+      }
+    } else {
+        //findBestSplitValueUnordered(nodeID, varID, sum_node, num_samples_node, best_value, best_varID, best_decrease);
+    }
+  }
+
+// Stop if no good split found
+  if (best_decrease < 0) {
+    return true;
+  }
+
+// Save best values
+  split_varIDs[nodeID] = best_varID;
+  split_values[nodeID] = best_value;
+
+// Compute decrease of impurity for this node and add to variable importance if needed
+  if (importance_mode == ranger::IMP_GINI || importance_mode == ranger::IMP_GINI_CORRECTED) {
+    addImpurityImportance(nodeID, best_varID, best_decrease);
+  }
+  return false;
+}
+
+void ArmaDouble::sort() {
+    PRINT_TIME(std::cout<<"Sort";);
+
+    // For all columns, get unique values and save index for each observation
+    /*for (size_t col = 0; col < num_cols_no_snp; ++col) {
+        arma::uvec col_unidx = arma::find_unique(rdata->data.col(col));
+        
+        }*/
+    
+    // Reserve memory
+    index_data.resize(num_cols_no_snp * num_rows);
+    index_data.clear();
+    unique_data_values.clear();
+    
+    // For all columns, get unique values and save index for each observation
+    for (size_t col = 0; col < num_cols_no_snp; ++col) {
+        
+        // Get all unique values
+        std::vector<double> unique_values(num_rows);
+        for (size_t row = 0; row < num_rows; ++row) {
+            unique_values[row] = get(row, col);
+        }
+        std::sort(unique_values.begin(), unique_values.end());
+        unique_values.erase(unique(unique_values.begin(), unique_values.end()), unique_values.end());
+        
+        // Get index of unique value
+        for (size_t row = 0; row < num_rows; ++row) {
+            size_t idx = std::lower_bound(unique_values.begin(), unique_values.end(), get(row, col)) - unique_values.begin();
+            index_data[col * num_rows + row] = idx;
+        }
+        
+        // Save unique values
+        unique_data_values.push_back(unique_values);
+        if (unique_values.size() > max_num_unique_values) {
+          max_num_unique_values = unique_values.size();
+        }
+    }
+    PRINT_TIME(std::cout<<"Sort done";);
+}
+
+void TreeSCOPA::findBestSplitValueSmallQ(size_t nodeID, size_t varID, double sum_node, size_t num_samples_node,
+    double& best_value, size_t& best_varID, double& best_decrease, arma::vec& svec) {
+
+  // Create possible split values
+  std::vector<double> possible_split_values;
+  data->getAllValues(possible_split_values, sampleIDs[nodeID], varID);
+
+  // Try next variable if all equal for this
+  if (possible_split_values.size() < 2) {
+    return;
+  }
+
+  // -1 because no split possible at largest value
+  const size_t num_splits = possible_split_values.size() - 1;
+    std::fill_n(sums.begin(), num_splits, 0);
+    std::fill_n(counter.begin(), num_splits, 0);
+    findBestSplitValueSmallQ(nodeID, varID, sum_node, num_samples_node, best_value, best_varID, best_decrease,
+                             possible_split_values, sums, counter, svec);
+}
+
+void TreeSCOPA::findBestSplitValueSmallQ(size_t nodeID, size_t varID, double sum_node, size_t num_samples_node,
+    double& best_value, size_t& best_varID, double& best_decrease, std::vector<double> possible_split_values,
+    std::vector<double>& sums_right, std::vector<size_t>& n_right, arma::vec& svec) {
+  // -1 because no split possible at largest value
+  const size_t num_splits = possible_split_values.size() - 1;
+
+  // Sum in right child and possbile split
+  for (auto& sampleID : sampleIDs[nodeID]) {
+    double value = data->get(sampleID, varID);
+    double response = data->get(sampleID, dependent_varID);
+    
+    // Count samples until split_value reached
+    for (size_t i = 0; i < num_splits; ++i) {
+      if (value > possible_split_values[i]) {
+        ++n_right[i];
+        sums_right[i] += response;
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Compute decrease of impurity for each possible split
+  for (size_t i = 0; i < num_splits; ++i) {
+
+    // Stop if one child empty
+    size_t n_left = num_samples_node - n_right[i];
+    if (n_left == 0 || n_right[i] == 0) {
+      continue;
+    }
+
+    double sum_right = sums_right[i];
+    double sum_left = sum_node - sum_right;
+    double decrease = sum_left * sum_left / (double) n_left + sum_right * sum_right / (double) n_right[i];
+
+    // If better than before, use this
+    if (decrease - best_decrease > 1e-5) {
+        //if (decrease > best_decrease) {
+      best_value = (possible_split_values[i] + possible_split_values[i + 1]) / 2;
+      best_varID = varID;
+      best_decrease = decrease;
+
+      // Use smaller value if average is numerically the same as the larger value
+      if (best_value == possible_split_values[i + 1]) {
+        best_value = possible_split_values[i];
+      }
+    }
+  }
+}
+
+void TreeSCOPA::findBestSplitValueLargeQ(size_t nodeID, size_t varID, double sum_node, size_t num_samples_node,
+    double& best_value, size_t& best_varID, double& best_decrease, arma::vec& svec) {
+
+  // Set counters to 0
+  size_t num_unique = data->getNumUniqueDataValues(varID);
+  std::fill_n(counter.begin(), num_unique, 0);
+  std::fill_n(sums.begin(), num_unique, 0);
+
+  for (auto& sampleID : sampleIDs[nodeID]) {
+    size_t index = data->getIndex(sampleID, varID);
+
+    sums[index] += data->get(sampleID, dependent_varID);
+    ++counter[index];
+  }
+
+  size_t n_left = 0;
+  double sum_left = 0;
+
+  // Compute decrease of impurity for each split
+  for (size_t i = 0; i < num_unique - 1; ++i) {
+
+    // Stop if nothing here
+    if (counter[i] == 0) {
+      continue;
+    }
+
+    n_left += counter[i];
+    sum_left += sums[i];
+
+    // Stop if right child empty
+    size_t n_right = num_samples_node - n_left;
+    if (n_right == 0) {
+      break;
+    }
+
+    double sum_right = sum_node - sum_left;
+    double decrease = sum_left * sum_left / (double) n_left + sum_right * sum_right / (double) n_right;
+
+    // If better than before, use this
+    if (decrease > best_decrease) {
+      // Find next value in this node
+      size_t j = i + 1;
+      while (j < num_unique && counter[j] == 0) {
+        ++j;
+      }
+
+      // Use mid-point split
+      best_value = (data->getUniqueDataValue(varID, i) + data->getUniqueDataValue(varID, j)) / 2;
+      best_varID = varID;
+      best_decrease = decrease;
+
+      // Use smaller value if average is numerically the same as the larger value
+      if (best_value == data->getUniqueDataValue(varID, j)) {
+        best_value = data->getUniqueDataValue(varID, i);
+      }
+    }
+  }
+}
+
+void TreeSCOPA::addImpurityImportance(size_t nodeID, size_t varID, double decrease) {
+
+  double best_decrease = decrease;
+  if (splitrule != ranger::MAXSTAT) {
+      double sum_node = sum_curr;
+    best_decrease = decrease - sum_node * sum_node / (double) sampleIDs[nodeID].size();
+  }
+
+  // No variable importance for no split variables
+  size_t tempvarID = data->getUnpermutedVarID(varID);
+  for (auto& skip : data->getNoSplitVariables()) {
+    if (tempvarID >= skip) {
+      --tempvarID;
+    }
+  }
+
+  // Subtract if corrected importance and permuted variable, else add
+  if (importance_mode == ranger::IMP_GINI_CORRECTED && varID >= data->getNumCols()) {
+    (*variable_importance)[tempvarID] -= best_decrease;
+  } else {
+    (*variable_importance)[tempvarID] += best_decrease;
+  }
+}
+
